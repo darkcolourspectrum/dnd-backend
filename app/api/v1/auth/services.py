@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
-from ..models import User, RefreshToken
+from app.api.v1.models import User, RefreshToken
 from typing import Optional
 from app.core.security import (
     get_password_hash, 
@@ -11,7 +11,7 @@ from app.core.security import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS
 )
-from .schemas import UserCreate, UserLogin, RefreshTokenRequest, TokenResponse, MessageResponse
+from app.api.v1.auth.schemas import UserCreate, UserLogin, RefreshTokenRequest, TokenResponse, MessageResponse
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
@@ -89,21 +89,20 @@ def generate_tokens(db: Session, user: User, fingerprint: str) -> TokenResponse:
     )
 
 def refresh_tokens(db: Session, request: RefreshTokenRequest) -> TokenResponse:
-    """Обновление токенов с расширенной диагностикой"""
     try:
-        # 1. Логируем входящий запрос
+        # Логируем входящий запрос
         print(f"\n=== Refresh Request ===")
         print(f"Incoming refresh_token: {request.refresh_token}")
         print(f"Incoming fingerprint: {request.fingerprint}")
 
-        # 2. Ищем токен в базе
+        # Ищем токен в базе
         db_token = db.query(RefreshToken).filter(
             RefreshToken.uuid == request.refresh_token,
             RefreshToken.fingerprint == request.fingerprint
         ).first()
 
         if not db_token:
-            # 3. Если токен не найден, проверяем существование в принципе
+            # Если токен не найден, проверяем существование в принципе
             exists = db.query(RefreshToken).filter(
                 RefreshToken.uuid == request.refresh_token
             ).first()
@@ -115,7 +114,7 @@ def refresh_tokens(db: Session, request: RefreshTokenRequest) -> TokenResponse:
                 detail="Invalid token or fingerprint"
             )
 
-        # 4. Проверяем срок действия
+        # Проверяем срок действия
         current_time = datetime.now(timezone.utc)
         if db_token.expires_at < current_time:
             print(f"Token expired. Expires: {db_token.expires_at}, Current: {current_time}")
@@ -131,16 +130,16 @@ def refresh_tokens(db: Session, request: RefreshTokenRequest) -> TokenResponse:
                 detail="Token revoked"
             )
 
-        # 5. Логируем найденный токен
+        # Логируем найденный токен
         print(f"Valid token found for user: {db_token.user.email}")
         print(f"Token created: {db_token.created_at}, expires: {db_token.expires_at}")
 
-        # 6. Удаляем старый токен
+        # Удаляем старый токен
         db.delete(db_token)
         db.commit()
         print("Old token deleted successfully")
 
-        # 7. Генерируем новые токены
+        # Генерируем новые токены
         new_tokens = generate_tokens(db, db_token.user, request.fingerprint)
         print("New tokens generated successfully")
         

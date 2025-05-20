@@ -20,6 +20,7 @@ from .services import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+
 @router.post("/register", response_model=MessageResponse)
 def register(user: UserCreate, db: Session = Depends(get_db)):
     create_user(db, user)
@@ -41,7 +42,6 @@ def logout(
     request: RefreshTokenRequest,
     db: Session = Depends(get_db) 
 ):
-    "Выход из системы"
     return logout_user(db, request)
 
 @router.get("/me", response_model=UserResponse)

@@ -5,6 +5,7 @@ from .api.v1.characters.endpoints import router as character_router
 from .api.v1.npc.endpoints import router as npc_router
 from .api.v1.dice.endpoints import router as dice_router
 from .api.v1.map.endpoints import router as map_router
+from fastapi.middleware.cors import CORSMiddleware
 import sys
 
 if "--reload" in sys.argv:
@@ -15,9 +16,21 @@ app = FastAPI(
     title="DnD Multiplayer API",
     description="API для авторизации и игровых сессий",
     version="1.3.0"
-
-    
 )
+
+origins = [
+    "http://localhost:3000",  
+    "http://127.0.0.1:3000",  
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 app.include_router(auth_router)
 app.include_router(sessions_router)

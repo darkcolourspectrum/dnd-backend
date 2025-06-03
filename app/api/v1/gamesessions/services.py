@@ -3,28 +3,34 @@ from app.api.v1.models import GameSession, SessionPlayer, Character
 from app.api.v1.gamesessions.utils import generate_session_id
 from .connection_manager import manager
 from datetime import datetime
+from typing import List, Optional
 
-async def create_gamesession(db: Session, creator_id: int, max_players: int = 4) -> GameSession:
+
+def create_gamesession(db: Session, creator_id: int, max_players: int = 4) -> GameSession:
     session_id = generate_session_id()
     
     db_session = GameSession(
         id=session_id,
         creator_id=creator_id,
-        max_players=max_players,
         status='waiting',
-        created_at=datetime.now()
+        max_players=max_players,
+        created_at=datetime.utcnow(),
+        current_turn_user_id=None,
+        is_current_turn_active=False,
+        turn_number=0
     )
     
     db.add(db_session)
     db.commit()
     db.refresh(db_session)
     
-    # Добавляем создателя как GM (без персонажа)
+    # Создаем запись игрока (GM)
     player = SessionPlayer(
         session_id=session_id,
         user_id=creator_id,
-        is_ready=True,
-        is_gm=True  
+        is_ready=True,  # GM автоматически готов
+        is_gm=True,
+        character_id=None
     )
     
     db.add(player)
@@ -100,12 +106,16 @@ async def add_player_to_session(
     })
     return player
 
+def get_gamesession(db: Session, session_id: str) -> Optional[GameSession]:
+    """Получение игровой сессии по ID"""
+    return db.query(GameSession).filter(GameSession.id == session_id).first()
 
-async def get_gamesession(db: Session, session_id: str) -> GameSession | None:
-    """Получение информации о сессии"""
-    return db.query(GameSession).filter(
-        GameSession.id == session_id
-    ).first()
+async def get_gamesessions(db: Session, skip: int = 0, limit: int = 100) -> List[GameSession]:
+    return db.query(GameSession)\
+        .filter(GameSession.status == 'waiting')\
+        .offset(skip)\
+        .limit(limit)\
+        .all()
 
 
 async def start_gamesession(db: Session, session_id: str, user_id: int) -> GameSession:
@@ -149,3 +159,4 @@ async def start_gamesession(db: Session, session_id: str, user_id: int) -> GameS
     })
     
     return session
+

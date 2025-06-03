@@ -5,7 +5,7 @@ import uuid
 from typing import Optional, Dict, Any
 
 # Конфигурация
-SECRET_KEY = "your-secret-key" 
+SECRET_KEY = "secret-key" 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 7

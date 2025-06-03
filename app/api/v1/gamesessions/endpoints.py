@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from typing import Optional
@@ -12,8 +12,9 @@ from app.api.v1.gamesessions.dependencies import (
 from app.api.v1.models import User
 from .connection_manager import manager
 from app.core.security import decode_access_token
-from app.api.v1.models import GameSession
+from app.api.v1.models import GameSession, SessionPlayer
 from fastapi.websockets import WebSocketDisconnect
+from typing import List 
 
 router = APIRouter(
     prefix="/gamesessions",
@@ -21,33 +22,60 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=schemas.GameSession)
-async def create_game_session(
-    session_data: schemas.GameSessionCreate,
+def create_game_session(
+    session_data: schemas.GameSessionCreate,  # Добавьте схему с max_players
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Создание новой игровой сессии"""
-    return services.create_gamesession(
-        db=db,
-        creator_id=current_user.id,
-        max_players=session_data.max_players
-    )
+    try:
+        session = services.create_gamesession(
+            db, 
+            current_user.id,
+            max_players=session_data.max_players
+        )
+        return session
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
-@router.get("/{session_id}", response_model=schemas.GameSession)
-async def get_game_session(
-    session: schemas.GameSession = Depends(validate_game_session_access)
+@router.get("/{session_id}/gm-redirect", response_model=schemas.GameSession)
+async def gm_redirect_to_session(
+    session: GameSession = Depends(validate_session_ownership),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """Получение информации о сессии"""
+    """
+    Специальный endpoint для перенаправления GM в сессию.
+    Проверяет права GM и возвращает полные данные сессии.
+    """
+    # Дополнительная проверка, что пользователь действительно GM
+    player = db.query(SessionPlayer).filter(
+        SessionPlayer.session_id == session.id,
+        SessionPlayer.user_id == current_user.id,
+        SessionPlayer.is_gm == True
+    ).first()
+    
+    if not player:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not the GM of this session"
+        )
+    
+    # Обновляем статус готовности GM
+    player.is_ready = True
+    db.commit()
+    
     return session
 
 @router.post("/{session_id}/join", response_model=schemas.SessionPlayer)
-async def join_game_session(
+def join_game_session(
     session_id: str,
-    character_id: int,  # Добавляем параметр
-    current_user: User = Depends(get_current_active_user),
+    character_id: int = Body(..., embed=True),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Присоединение к существующей сессии с указанием персонажа"""
     try:
         return services.add_player_to_session(
             db=db,
@@ -61,12 +89,17 @@ async def join_game_session(
             detail=str(e)
         )
 
-@router.post("/{session_id}/start", response_model=schemas.GameSession)
-async def start_game_session(
-    db: Session = Depends(get_db),
-    session: schemas.GameSession = Depends(validate_session_ownership)
+@router.get("/{session_id}", response_model=schemas.GameSession)
+def get_game_session(
+    session: GameSession = Depends(validate_game_session_access)
 ):
-    """Начало игры (перевод статуса в 'active')"""
+    return session
+
+@router.post("/{session_id}/start", response_model=schemas.GameSession)
+def start_game_session(
+    db: Session = Depends(get_db),
+    session: GameSession = Depends(validate_session_ownership)
+):
     try:
         return services.start_gamesession(
             db=db,
@@ -79,6 +112,47 @@ async def start_game_session(
             detail=str(e)
         )
     
+@router.get("/{session_id}/players", response_model=List[schemas.SessionPlayer])
+def get_session_players(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    players = db.query(SessionPlayer).filter(
+        SessionPlayer.session_id == session_id
+    ).all()
+    
+    if not players:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No players found in this session"
+        )
+    
+    return players
+
+@router.post("/{session_id}/ready", response_model=schemas.SessionPlayer)
+def toggle_ready_status(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    player = db.query(SessionPlayer).filter(
+        SessionPlayer.session_id == session_id,
+        SessionPlayer.user_id == current_user.id
+    ).first()
+    
+    if not player:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found in this session"
+        )
+    
+    player.is_ready = not player.is_ready
+    db.commit()
+    db.refresh(player)
+    
+    return player
+
 @router.websocket("/{session_id}/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -92,6 +166,16 @@ async def websocket_endpoint(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     
+    # Проверка что пользователь участник сессии
+    player = db.query(SessionPlayer).filter(
+        SessionPlayer.session_id == session_id,
+        SessionPlayer.user_id == user.id
+    ).first()
+    
+    if not player:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
     # Подключение к менеджеру
     await manager.connect(session_id, user.id, websocket)
     
@@ -99,14 +183,23 @@ async def websocket_endpoint(
         # Отправляем текущее состояние сессии новому подключению
         initial_state = {
             "type": "initial_state",
-            "data": manager.get_session_state(session_id)
+            "data": {
+                **manager.get_session_state(session_id),
+                "is_gm": player.is_gm  # Добавляем информацию о GM статусе
+            }
         }
         await websocket.send_json(initial_state)
         
         # Уведомляем других игроков о новом подключении
         await manager.broadcast(
             session_id,
-            {"type": "player_connected", "data": {"user_id": user.id}},
+            {
+                "type": "player_connected", 
+                "data": {
+                    "user_id": user.id,
+                    "is_gm": player.is_gm
+                }
+            },
             exclude_user_id=user.id
         )
         
@@ -120,14 +213,30 @@ async def websocket_endpoint(
                 await handle_end_turn(session_id, user.id, db)
             elif data["type"] == "roll_dice":
                 await handle_dice_roll(session_id, user.id, data["data"], db)
+            elif data["type"] == "gm_command" and player.is_gm:
+                await handle_gm_command(session_id, user.id, data["data"], db)
             
     except WebSocketDisconnect:
         manager.disconnect(session_id, user.id)
         await manager.broadcast(
             session_id,
-            {"type": "player_disconnected", "data": {"user_id": user.id}}
+            {
+                "type": "player_disconnected", 
+                "data": {"user_id": user.id}
+            }
         )
 
+async def handle_gm_command(session_id: str, user_id: int, command_data: dict, db: Session):
+    """Обработка команд GM"""
+    # Пример: изменение состояния игры, добавление NPC и т.д.
+    await manager.broadcast(
+        session_id,
+        {
+            "type": "gm_command",
+            "data": command_data
+        }
+    )
+    
 async def authenticate_websocket_user(db: Session, token: str) -> Optional[User]:
     payload = decode_access_token(token)
     if not payload:
@@ -208,3 +317,4 @@ def get_next_player_id(session: GameSession) -> int:
     current_index = session.players_order.index(session.current_turn_user_id)
     next_index = (current_index + 1) % len(session.players_order)
     return session.players_order[next_index]
+

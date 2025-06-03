@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 class GameSessionBase(BaseModel):
     max_players: int = 4
@@ -14,9 +14,12 @@ class GameSession(GameSessionBase):
     status: str  # 'waiting', 'active', 'finished'
     created_at: datetime
     players: List['SessionPlayer']
+    current_turn_user_id: Optional[int] = None
+    is_current_turn_active: bool = False
+    turn_number: int = 0
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class SessionPlayerBase(BaseModel):
     is_ready: bool = False
@@ -28,7 +31,7 @@ class SessionPlayer(SessionPlayerBase):
     id: int
     session_id: str
     user_id: int
-    character_id: int
+    character_id: int | None 
     is_gm: bool
     
     class Config:

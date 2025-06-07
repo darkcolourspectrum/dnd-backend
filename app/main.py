@@ -31,6 +31,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import Request
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DatabaseCleanupMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as e:
+            logger.error(f"Request error: {e}")
+            raise
+        finally:
+            try:
+                from app.db.session import engine
+                if hasattr(engine.pool, 'invalidate'):
+                    pass  
+            except Exception:
+                pass
+
+app.add_middleware(DatabaseCleanupMiddleware)
 
 app.include_router(auth_router)
 app.include_router(sessions_router)
@@ -42,3 +65,20 @@ app.include_router(map_router)
 @app.get("/")
 def read_root():
     return {"message": "DnD Multiplayer API v1 with auth"}
+
+@app.get("/health/db")
+def check_database():
+    try:
+        from app.db.session import engine
+        with engine.connect() as conn:
+            conn.execute("SELECT 1")
+        return {
+            "status": "healthy",
+            "pool_size": engine.pool.size(),
+            "pool_checked_in": engine.pool.checkedin(),
+            "pool_checked_out": engine.pool.checkedout(),
+            "pool_overflow": engine.pool.overflow(),
+            "pool_invalid": engine.pool.invalid()
+        }
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}

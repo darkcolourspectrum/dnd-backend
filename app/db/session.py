@@ -3,19 +3,32 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 
-# Движок для подключения к базе данных
-engine = create_engine(settings.DATABASE_URL)
+engine = create_engine(
+    settings.DATABASE_URL,
+    pool_size=20,        
+    max_overflow=30,      
+    pool_timeout=60,       
+    pool_recycle=3600,     
+    pool_pre_ping=True,    
+    echo=False             
+)
 
-# Фабрика сессий
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    autocommit=False, 
+    autoflush=False, 
+    bind=engine,
+    expire_on_commit=False  
+)
 
-# Базовый класс для моделей SQLAlchemy
 Base = declarative_base()
 
-# Зависимость для получения сессии базы данных
 def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception as e:
+        print(f"Database session error: {e}")
+        db.rollback()
+        raise
     finally:
-        db.close()
+        db.close()  # Обязательно закрываем соединение

@@ -1,3 +1,5 @@
+# app/api/v1/gamesessions/endpoints.py
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -6,6 +8,7 @@ from app.api.v1.auth.dependencies import get_current_user
 from app.api.v1.gamesessions import schemas, services
 from app.api.v1.gamesessions.dependencies import (
     get_current_active_user,
+    get_game_session_info,
     validate_game_session_access,
     validate_session_ownership
 )
@@ -23,7 +26,7 @@ router = APIRouter(
 
 @router.post("/", response_model=schemas.GameSession)
 def create_game_session(
-    session_data: schemas.GameSessionCreate,  # Добавьте схему с max_players
+    session_data: schemas.GameSessionCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -70,18 +73,22 @@ async def gm_redirect_to_session(
     return session
 
 @router.post("/{session_id}/join", response_model=schemas.SessionPlayer)
-def join_game_session(
+async def join_game_session(
     session_id: str,
-    character_id: int = Body(..., embed=True),
+    character_id: Optional[int] = Body(None, embed=True),  # Делаем опциональным
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """
+    Присоединение к игровой сессии
+    Персонаж может быть выбран позже в лобби
+    """
     try:
-        return services.add_player_to_session(
+        return await services.add_player_to_session(
             db=db,
             session_id=session_id,
             user_id=current_user.id,
-            character_id=character_id
+            character_id=character_id  # Может быть None
         )
     except ValueError as e:
         raise HTTPException(
@@ -91,17 +98,22 @@ def join_game_session(
 
 @router.get("/{session_id}", response_model=schemas.GameSession)
 def get_game_session(
-    session: GameSession = Depends(validate_game_session_access)
+    session: GameSession = Depends(get_game_session_info)  # Изменено! Теперь разрешает просмотр всем
 ):
+    """
+    Получение информации о сессии
+    Доступно всем авторизованным пользователям для просмотра
+    """
     return session
 
 @router.post("/{session_id}/start", response_model=schemas.GameSession)
-def start_game_session(
+async def start_game_session(
     db: Session = Depends(get_db),
     session: GameSession = Depends(validate_session_ownership)
 ):
     try:
-        return services.start_gamesession(
+        # ИСПРАВЛЕНИЕ: добавлен await
+        return await services.start_gamesession(
             db=db,
             session_id=session.id,
             user_id=session.creator_id
@@ -116,17 +128,23 @@ def start_game_session(
 def get_session_players(
     session_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)  # Изменено! Разрешаем всем авторизованным
 ):
+    """
+    Получение списка игроков в сессии
+    Доступно всем авторизованным пользователям
+    """
+    # Проверяем, что сессия существует
+    session = db.query(GameSession).filter(GameSession.id == session_id).first()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
     players = db.query(SessionPlayer).filter(
         SessionPlayer.session_id == session_id
     ).all()
-    
-    if not players:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No players found in this session"
-        )
     
     return players
 
@@ -136,6 +154,10 @@ def toggle_ready_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Изменение статуса готовности
+    Требует членства в сессии
+    """
     player = db.query(SessionPlayer).filter(
         SessionPlayer.session_id == session_id,
         SessionPlayer.user_id == current_user.id
@@ -152,6 +174,79 @@ def toggle_ready_status(
     db.refresh(player)
     
     return player
+
+@router.delete("/{session_id}", response_model=schemas.MessageResponse)
+async def delete_game_session(
+    db: Session = Depends(get_db),
+    session: GameSession = Depends(validate_session_ownership)
+):
+    """
+    Удаление игровой сессии (только для создателя сессии)
+    Удаляет все связанные данные: игроков, NPC, карты
+    """
+    try:
+        session_id = session.id
+        
+        # Отключаем всех игроков через WebSocket
+        await manager.broadcast(
+            session_id,
+            {
+                "type": "session_deleted",
+                "data": {"message": "Сессия была удалена создателем"}
+            }
+        )
+        
+        # Удаляем все связанные записи (cascade должен работать, но делаем явно для надежности)
+        
+        # 1. Удаляем игроков сессии
+        db.query(SessionPlayer).filter(SessionPlayer.session_id == session_id).delete()
+        
+        # 2. Удаляем NPC
+        from app.api.v1.models import NPC
+        db.query(NPC).filter(NPC.session_id == session_id).delete()
+        
+        # 3. Удаляем карты
+        from app.api.v1.models import GameMap
+        db.query(GameMap).filter(GameMap.session_id == session_id).delete()
+        
+        # 4. Удаляем саму сессию
+        db.delete(session)
+        
+        # Коммитим все изменения
+        db.commit()
+        
+        # Очищаем соединения в менеджере
+        manager.cleanup_session(session_id)
+        
+        return {"message": f"Сессия {session_id} успешно удалена"}
+        
+    except Exception as e:
+        db.rollback()
+        print(f"Error deleting session {session.id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при удалении сессии: {str(e)}"
+        )
+
+@router.get("/my-sessions", response_model=List[schemas.GameSession])
+def get_my_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Получение всех сессий, созданных текущим пользователем
+    """
+    try:
+        sessions = db.query(GameSession).filter(
+            GameSession.creator_id == current_user.id
+        ).order_by(GameSession.created_at.desc()).all()
+        
+        return sessions
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при получении сессий: {str(e)}"
+        )
 
 @router.websocket("/{session_id}/ws")
 async def websocket_endpoint(
@@ -177,15 +272,17 @@ async def websocket_endpoint(
         return
     
     # Подключение к менеджеру
-    await manager.connect(session_id, user.id, websocket)
+    await manager.connect(session_id, user.id, websocket, player.is_gm)
     
     try:
         # Отправляем текущее состояние сессии новому подключению
         initial_state = {
             "type": "initial_state",
             "data": {
-                **manager.get_session_state(session_id),
-                "is_gm": player.is_gm  # Добавляем информацию о GM статусе
+                "session_id": session_id,
+                "user_id": user.id,
+                "is_gm": player.is_gm,
+                "players": manager.get_session_players(session_id)
             }
         }
         await websocket.send_json(initial_state)
@@ -215,6 +312,8 @@ async def websocket_endpoint(
                 await handle_dice_roll(session_id, user.id, data["data"], db)
             elif data["type"] == "gm_command" and player.is_gm:
                 await handle_gm_command(session_id, user.id, data["data"], db)
+            elif data["type"] == "chat_message":
+                await handle_chat_message(session_id, user.id, data["data"], db)
             
     except WebSocketDisconnect:
         manager.disconnect(session_id, user.id)
@@ -228,12 +327,25 @@ async def websocket_endpoint(
 
 async def handle_gm_command(session_id: str, user_id: int, command_data: dict, db: Session):
     """Обработка команд GM"""
-    # Пример: изменение состояния игры, добавление NPC и т.д.
     await manager.broadcast(
         session_id,
         {
             "type": "gm_command",
             "data": command_data
+        }
+    )
+
+async def handle_chat_message(session_id: str, user_id: int, message_data: dict, db: Session):
+    """Обработка сообщений чата"""
+    await manager.broadcast(
+        session_id,
+        {
+            "type": "chat_message",
+            "data": {
+                "user_id": user_id,
+                "message": message_data.get("message", ""),
+                "timestamp": message_data.get("timestamp")
+            }
         }
     )
     
@@ -254,7 +366,7 @@ async def handle_move(session_id: str, user_id: int, move_data: dict, db: Sessio
     if not session or session.current_turn_user_id != user_id or not session.is_current_turn_active:
         return
     
-    # Обновляем позицию
+    # Обновляем позицию в менеджере соединений
     manager.update_player_position(session_id, user_id, move_data["position"])
     
     # Рассылаем обновление
@@ -280,6 +392,11 @@ async def handle_end_turn(session_id: str, user_id: int, db: Session):
     
     # Определяем следующего игрока
     next_player_id = get_next_player_id(session)
+    if next_player_id:
+        session.current_turn_user_id = next_player_id
+        session.is_current_turn_active = True
+        session.turn_number += 1
+        db.commit()
     
     await manager.broadcast(
         session_id,
@@ -287,14 +404,16 @@ async def handle_end_turn(session_id: str, user_id: int, db: Session):
             "type": "turn_ended",
             "data": {
                 "current_player_id": user_id,
-                "next_player_id": next_player_id
+                "next_player_id": next_player_id,
+                "turn_number": session.turn_number
             }
         }
     )
 
 async def handle_dice_roll(session_id: str, user_id: int, roll_data: dict, db: Session):
     try:
-        result = services.roll_dice(roll_data["dice_formula"])
+        from app.api.v1.dice.services import roll_dice
+        result = roll_dice(roll_data["dice_formula"])
         await manager.broadcast(
             session_id,
             {
@@ -306,15 +425,26 @@ async def handle_dice_roll(session_id: str, user_id: int, roll_data: dict, db: S
                 }
             }
         )
-    except ValueError:
-        pass
+    except ValueError as e:
+        # Отправляем ошибку только отправителю
+        await manager.send_to_user(
+            session_id,
+            user_id,
+            {
+                "type": "dice_error",
+                "data": {"error": str(e)}
+            }
+        )
 
-def get_next_player_id(session: GameSession) -> int:
+def get_next_player_id(session: GameSession) -> Optional[int]:
     """Определяет ID следующего игрока"""
     if not session.players_order:
         return None
     
-    current_index = session.players_order.index(session.current_turn_user_id)
-    next_index = (current_index + 1) % len(session.players_order)
-    return session.players_order[next_index]
+    try:
+        current_index = session.players_order.index(session.current_turn_user_id)
+        next_index = (current_index + 1) % len(session.players_order)
+        return session.players_order[next_index]
+    except (ValueError, IndexError):
+        return None
 

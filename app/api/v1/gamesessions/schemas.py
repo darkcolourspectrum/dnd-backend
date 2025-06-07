@@ -45,3 +45,6 @@ class WSMessage(BaseModel):
         "game_started"
     ]
     data: dict
+
+class MessageResponse(BaseModel):
+    message: str
